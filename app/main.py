@@ -64,14 +64,6 @@ def main():
     image = sys.argv[2]
     command = sys.argv[3]
     args = sys.argv[4:]
-    dir_path = tempfile.mkdtemp()
-    shutil.copy2(command, dir_path)
-    os.chroot(dir_path)
-    command = os.path.join("/", os.path.basename(command))
-    # print(f'command before running: {command}')
-    libc = ctypes.cdll.LoadLibrary("libc.so.6")
-    libc.unshare(0x20000000)
-    completed_process = subprocess.run([command, *args], capture_output=True)
     # 1. get token from Docker auth server by making GET req using image from args
     token = get_docker_token(image_name=image)
     # 2. create header for docker calls
