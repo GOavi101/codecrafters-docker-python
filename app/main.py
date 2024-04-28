@@ -1,28 +1,92 @@
-import subprocess
 import sys
 import os
 import shutil
+import tarfile
 import tempfile
 import ctypes
+import urllib.request
+import json
+import subprocess
 
+def get_docker_token(image_name):
+    """Get the token from GitHub"""
+    # You need to get an auth token, but you don't need a username/password
+    # Say your image is busybox/latest, you would make a GET request to this
+    # URL: https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/busybox:pull
+    url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{image_name}:pull"
+    res = urllib.request.urlopen(url)
+    res_json = json.loads(res.read().decode())
+    return res_json["token"]
+
+def build_docker_headers(token):
+    """Generate the docker headers for requests"""
+    return {
+        "Accept": "application/vnd.docker.distribution.manifest.v2+json",
+        "Authorization": f"Bearer {token}",
+    }
+    
+def get_docker_image_manifest(headers, image_name):
+    """retrieve the image manifest from docker hub"""
+    manifest_url = (
+        f"https://registry.hub.docker.com/v2/library/{image_name}/manifests/latest"
+    )
+    request = urllib.request.Request(
+        manifest_url,
+        headers=headers,
+    )
+    res = urllib.request.urlopen(request)
+    res_json = json.loads(res.read().decode())
+    return res_json
+
+def download_image_layers(headers: dict, image: str, layers) -> str:
+    """download the layers and extract the files"""
+    dir_path = tempfile.mkdtemp()
+    # loop the layers to pull down each manifest
+    for layer in layers:
+        url = f"https://registry.hub.docker.com/v2/library/{image}/blobs/{layer['digest']}"
+        sys.stderr.write(url)
+        request = urllib.request.Request(url, headers=headers)
+        res = urllib.request.urlopen(request)
+        tmp_file = os.path.join(dir_path, "manifest.tar")
+        with open(tmp_file, "wb") as f:
+            shutil.copyfileobj(res, f)
+        with tarfile.open(tmp_file) as tar:
+            tar.extractall(dir_path)
+    os.remove(tmp_file)
+    return dir_path
 
 def main():
+    # You can use print statements as follows for debugging, they'll be visible when running tests.
+    # print("Logs from your program will appear here!")
+    # Uncomment this block to pass the first stage
+    #
+    # print(sys.argv)
+    image = sys.argv[2]
     command = sys.argv[3]
     args = sys.argv[4:]
-    
     dir_path = tempfile.mkdtemp()
     shutil.copy2(command, dir_path)
     os.chroot(dir_path)
-    
+    command = os.path.join("/", os.path.basename(command))
+    # print(f'command before running: {command}')
     libc = ctypes.cdll.LoadLibrary("libc.so.6")
     libc.unshare(0x20000000)
-    
-    command = os.path.join("/", os.path.basename(command))
     completed_process = subprocess.run([command, *args], capture_output=True)
+    # 1. get token from Docker auth server by making GET req using image from args
+    token = get_docker_token(image_name=image)
+    # 2. create header for docker calls
+    headers = build_docker_headers(token)
+    # 3. get image manifest for specified image from Docker Hub
+    manifest = get_docker_image_manifest(headers, image)
+    # 4. Download layers from manifest file and put result a tarfile (call it manifest.tar)
+    dir_path = download_image_layers(headers, image, manifest["layers"])
+    completed_process = subprocess.run(
+        ["unshare", "-fpu", "chroot", dir_path, command, *args], capture_output=True
+    )
+    # print(completed_process.stdout.decode("utf-8"))
     sys.stdout.buffer.write(completed_process.stdout)
     sys.stderr.buffer.write(completed_process.stderr)
     sys.exit(completed_process.returncode)
-
-
+    
 if __name__ == "__main__":
     main()
